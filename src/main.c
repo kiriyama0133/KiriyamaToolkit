@@ -2,7 +2,15 @@
 #include <windows.h>
 #include "runtime.h"
 
-static void task(AsyncOperation* operation, void* context)
+static void task1(AsyncOperation* operation, void* context)
+{
+    (void)operation;
+    (void)context;
+    printf("task start\n");
+    Sleep(3000);
+    printf("task done\n");
+}
+static void task2(AsyncOperation* operation, void* context)
 {
     (void)operation;
     (void)context;
@@ -13,15 +21,15 @@ static void task(AsyncOperation* operation, void* context)
 
 int main(void)
 {
-    AsyncOperation* operation = ASYNC_CREATE(task, NULL);
+    AsyncOperation* operation1 = ASYNC_CREATE(task1, NULL);
+    AsyncOperation* operation2 = ASYNC_CREATE(task2, NULL);
     // ASYNC_SUBMIT(operation);
     // AsyncResult result = ASYNC_AWAIT(operation);
     // printf("state = %d\n", result.state);
     // return 0;
     printf("main continues\n");
-    Sleep(1000);
-    printf("main still running\n");
-    Sleep(3000);
-    printf("state = %d\n", async_operation_state(operation));
+    Sleep(4000);
+    printf("state = %d\n", async_operation_state(operation1));
+    printf("state = %d\n", async_operation_state(operation2));
     return 0;
 }

@@ -5,7 +5,8 @@
 
 struct AsyncPlatform {
     HANDLE wake_event;
-    HANDLE worker;
+    HANDLE* workers;
+    int worker_count;
     CRITICAL_SECTION lock;
 };
 
@@ -28,9 +29,12 @@ AsyncPlatform* async_platform_create(void) {
 
 void async_platform_destroy(AsyncPlatform* platform) {
     if (!platform) return;
-    if (platform->worker) {
-        CloseHandle(platform->worker);
-        platform->worker = NULL;
+    if (platform->workers) {
+        for (int i = 0; i < platform->worker_count; i++) {
+            CloseHandle(platform->workers[i]);
+            platform->workers[i] = NULL;
+        }
+        free(platform->workers);
     }
     if (platform->wake_event) {
         CloseHandle(platform->wake_event);
@@ -73,7 +77,6 @@ static unsigned __stdcall platform_thread_entry(void* arg) {
 
 int async_platform_start_worker(AsyncPlatform* platform, void* (*entry)(void*), void* context) {
     if (!platform || !entry) return -1;
-    if (platform->worker) return -1;
     AsyncPlatformWorker* worker = malloc(sizeof(AsyncPlatformWorker));
     if (!worker) return -1;
     worker->entry = entry;
@@ -83,13 +86,25 @@ int async_platform_start_worker(AsyncPlatform* platform, void* (*entry)(void*), 
         free(worker);
         return -1;
     }
-    platform->worker = (HANDLE)handler;
+    HANDLE* workers = realloc(platform->workers, sizeof(HANDLE) * (platform->worker_count + 1));
+    if (!workers) {
+        CloseHandle((HANDLE)handler);
+        free(worker);
+        return -1;
+    }
+    platform->workers = workers;
+    platform->workers[platform->worker_count] = (HANDLE)handler;
+    platform->worker_count++;
+
     return 0;
 }
 
-void async_platform_join_worker(AsyncPlatform* platform) {
-    if (!platform || !platform->worker) return;
-    WaitForSingleObject(platform->worker, INFINITE);
+void async_platform_join_worker(AsyncPlatform* platform)
+{
+    if (!platform || !platform->workers)
+        return;
+    for (int i = 0; i < platform->worker_count; i++)
+        WaitForSingleObject(platform->workers[i], INFINITE);
 }
 
 void async_platform_lock(AsyncPlatform* platform) {

@@ -4,22 +4,34 @@
 #include "runtime_internal.h"
 
 AsyncRuntime* async_runtime_global = NULL;
+static int async_worker_limit = 1;
 
-AsyncRuntime* async_runtime_create(void) {
+void limit_async_worker_count(int worker_limit)
+{
+    async_worker_limit = worker_limit;
+}
+
+AsyncRuntime* async_runtime_create()
+{
     AsyncRuntime* runtime = calloc(1, sizeof(AsyncRuntime));
-    if (!runtime) return NULL;
-    runtime->platform=async_platform_create();
-    if (async_platform_start_worker(runtime->platform, runtime_worker, runtime) != 0) {
-        async_platform_destroy(runtime->platform);
+
+    if (!runtime)
+        return NULL;
+
+    runtime->platform = async_platform_create();
+
+    if (!runtime->platform)
+    {
         free(runtime);
         return NULL;
     }
-    if(!runtime->platform) {
-        free(runtime);
-        return NULL;
-    }
+
     runtime->running = 0;
     runtime->stopped = 0;
+    runtime->dispatching = 0;
+    runtime->worker_count = 0;
+    runtime->worker_limit = async_worker_limit;
+
     return runtime;
 }
 
@@ -105,11 +117,21 @@ int async_operation_submit(AsyncOperation* operation) {
     if (!runtime) return -1;
     if (operation->state != ASYNC_OPERATION_PENDING) return -1;
     if (operation->queued) return -1;
+    async_platform_lock(runtime->platform);
     operation->queued = 1;
     async_runtime_enqueue(runtime, operation);   
-    async_platform_lock(runtime->platform);
     // join in pending queue
     async_platform_unlock(runtime->platform);
+    if (runtime->worker_count < runtime->worker_limit)
+    {
+        if (async_platform_start_worker(
+            runtime->platform,
+            runtime_worker,
+            runtime) == 0)
+        {
+            runtime->worker_count++;
+        }
+    }
     async_platform_wakeup(runtime->platform);
     return 0;
 }
@@ -138,6 +160,7 @@ void async_runtime_destroy(AsyncRuntime* runtime)
 {
     if (!runtime) return;
     if (runtime->running || runtime->dispatching) return;
+    async_runtime_stop(runtime);
     async_platform_join_worker(runtime->platform);
     AsyncOperation* operation = runtime->operations;
     while (operation)
@@ -155,17 +178,14 @@ void async_operation_destroy(AsyncOperation* operation)
 {
     if (!operation)
         return;
-    AsyncRuntime* runtime =
-        operation->runtime;
+    AsyncRuntime* runtime = operation->runtime;
     if (!runtime)
         return;
     /*
      * 还在 pending queue 中，不能释放。
      */
-    if (operation->queued)
-        return;
-    AsyncOperation** current =
-        &runtime->operations;
+    if (operation->queued) return;
+    AsyncOperation** current = &runtime->operations;
     while (*current)
     {
         if (*current == operation)
@@ -231,6 +251,7 @@ static void* runtime_worker(void* context)
             if (!runtime->pending_head)
                 runtime->pending_tail = NULL;
             operation->next = NULL;
+            operation->queued = 0;
         }
 
         async_platform_unlock(runtime->platform);

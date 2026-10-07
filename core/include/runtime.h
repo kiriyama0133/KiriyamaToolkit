@@ -32,7 +32,7 @@ typedef void (*AsyncCallback) (AsyncOperation* operation, void* context);
 AsyncRuntime* async_runtime_create(void);
 void async_runtime_destroy(AsyncRuntime* runtime);
 extern AsyncRuntime* async_runtime_global;
-static void async_runtime_cleanup(void);    
+static void async_runtime_cleanup(void);
 // int async_runtime_run(AsyncRuntime* runtime);
 void async_runtime_stop(AsyncRuntime* runtime);
 // int async_runtime_poll(AsyncRuntime* runtime, int timeout_ms);
@@ -48,9 +48,12 @@ AsyncError async_operation_error(AsyncOperation* operation);
 AsyncOperationState async_operation_state(AsyncOperation* operation);
 // Worker
 static void* runtime_worker(void* context);
-
+void limit_async_worker_count(int worker_limit);
 
 // macro
+#define ASYNC_WORKER_LIMIT(worker_limit) \
+    limit_async_worker_count(worker_limit)
+
 #define ASYNC_CREATE(callback, context) \
     async_operation_create(callback, context)
 

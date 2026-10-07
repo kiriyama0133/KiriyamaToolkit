@@ -9,6 +9,8 @@ struct AsyncRuntime
     int running;
     int stopped;
     int dispatching;
+    int worker_count;
+    int worker_limit;
 };
 struct AsyncOperation
 {
