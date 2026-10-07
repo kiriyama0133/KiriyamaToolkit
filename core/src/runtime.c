@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include "runtime_internal.h"
 
+AsyncRuntime* async_runtime_global = NULL;
+
 AsyncRuntime* async_runtime_create(void) {
     AsyncRuntime* runtime = calloc(1, sizeof(AsyncRuntime));
     if (!runtime) return NULL;
@@ -88,6 +90,15 @@ static void async_runtime_enqueue(AsyncRuntime* runtime, AsyncOperation* operati
     runtime->pending_tail = operation;
 }
 
+static void async_runtime_cleanup(void)
+{
+    if (async_runtime_global)
+    {
+        async_runtime_destroy(async_runtime_global);
+        async_runtime_global = NULL;
+    }
+}
+
 int async_operation_submit(AsyncOperation* operation) {
     if (!operation) return -1;
     AsyncRuntime* runtime = operation->runtime;
@@ -102,11 +113,14 @@ int async_operation_submit(AsyncOperation* operation) {
     async_platform_wakeup(runtime->platform);
     return 0;
 }
-AsyncOperation* async_operation_create(AsyncRuntime* runtime, AsyncCallback callback, void* context) {
-    if (!runtime) return NULL;
+AsyncOperation* async_operation_create(AsyncCallback callback, void* context) {
     AsyncOperation* operation = calloc(1, sizeof(AsyncOperation));
     if (!operation) return NULL;
-    operation->runtime = runtime;
+    if (!async_runtime_global) {
+        async_runtime_global = async_runtime_create();
+        atexit(async_runtime_cleanup);
+    }
+    operation->runtime = async_runtime_global;
     operation->state = ASYNC_OPERATION_PENDING;
     operation->callback = callback;
     operation->context = context;
@@ -114,8 +128,9 @@ AsyncOperation* async_operation_create(AsyncRuntime* runtime, AsyncCallback call
     operation->error = ASYNC_ERROR_NONE;
 
     // part in runtime operation registry
-    operation->registry_next = runtime->operations;
-    runtime->operations = operation;
+    operation->registry_next = async_runtime_global->operations;
+    async_runtime_global->operations = operation;
+    async_operation_submit(operation);
     return operation;
 }
 
@@ -162,6 +177,16 @@ void async_operation_destroy(AsyncOperation* operation)
         current = &(*current)->registry_next;
     }
 }
+int async_operation_wait(AsyncOperation* operation)
+{
+    if (!operation) return -1;
+    while (operation->state == ASYNC_OPERATION_PENDING ||
+           operation->state == ASYNC_OPERATION_RUNNING)
+    {
+        async_platform_wait(operation->runtime->platform, 1);
+    }
+    return 0;
+}
 
 void async_operation_cancel(AsyncOperation* operation) {
     if (!operation) return;
@@ -175,10 +200,10 @@ AsyncOperationState async_operation_state(AsyncOperation* operation) {
     return operation->state;
 }
 
-void* async_operation_result(AsyncOperation* operation) {
-    if (!operation) return NULL;
-    if (operation->state != ASYNC_OPERATION_COMPLETED) return NULL;
-    return operation->result;
+AsyncResult async_operation_result(AsyncOperation* operation) {
+    if (!operation) return (AsyncResult){NULL, ASYNC_OPERATION_FAILED, ASYNC_ERROR_UNKNOWN};
+    if (operation->state != ASYNC_OPERATION_COMPLETED) return (AsyncResult){NULL, ASYNC_OPERATION_FAILED, ASYNC_ERROR_UNKNOWN};
+    return (AsyncResult){operation->result, operation->state, operation->error};
 }
 
 AsyncError async_operation_error(AsyncOperation* operation) {
@@ -186,34 +211,56 @@ AsyncError async_operation_error(AsyncOperation* operation) {
     return operation->error;
 }
 
-static void* runtime_worker(void* context) {
+static void* runtime_worker(void* context)
+{
     AsyncRuntime* runtime = (AsyncRuntime*)context;
-    for (;;) {
+
+    for (;;)
+    {
         async_platform_lock(runtime->platform);
-        if (runtime->stopped) {
+        if (runtime->stopped)
+        {
             async_platform_unlock(runtime->platform);
             break;
         }
+
         AsyncOperation* operation = runtime->pending_head;
-        if (operation) {
+        if (operation)
+        {
             runtime->pending_head = operation->next;
-            if (!runtime->pending_head) {
+            if (!runtime->pending_head)
                 runtime->pending_tail = NULL;
-            }
-        operation->next = NULL;
-    }
-    if (!operation) {
-        async_platform_wait(runtime->platform, -1);
-        continue;
-    }
-    if (operation->state == ASYNC_OPERATION_CANCELLED) {
-        continue;
-    }
-    operation->state = ASYNC_OPERATION_RUNNING;
-    if (operation->callback) {
-        operation->callback(operation, operation->context);
-    }
-    operation->state = ASYNC_OPERATION_COMPLETED;
+            operation->next = NULL;
+        }
+
+        async_platform_unlock(runtime->platform);
+        if (!operation)
+        {
+            async_platform_wait(runtime->platform, -1);
+            continue;
+        }
+
+        if (operation->state == ASYNC_OPERATION_CANCELLED)
+            continue;
+
+        operation->state = ASYNC_OPERATION_RUNNING;
+        if (operation->callback)
+            operation->callback(operation, operation->context);
+        if (operation->state == ASYNC_OPERATION_RUNNING)
+        {
+            operation->state = ASYNC_OPERATION_COMPLETED;
+            operation->error = ASYNC_ERROR_NONE;
+        }
     }
     return NULL;
+}
+
+AsyncResult async_operation_await(AsyncOperation* operation)
+{
+    async_operation_wait(operation);
+    AsyncResult result;
+    result.result = operation->result;
+    result.state = operation->state;
+    result.error = operation->error;
+    return result;
 }

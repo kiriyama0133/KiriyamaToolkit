@@ -10,4 +10,3 @@ void async_platform_join_worker(AsyncPlatform* platform);
 void async_platform_lock(AsyncPlatform* platform);
 void async_platform_unlock(AsyncPlatform* platform);
 
-
