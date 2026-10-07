@@ -22,5 +22,8 @@ struct AsyncOperation
     AsyncError error;
     AsyncOperation* next;          // pending queue
     AsyncOperation* registry_next;  // runtime operation registry
+    AsyncOperation* parent;
+    AsyncOperation* first_child;
+    AsyncOperation* sibling_next;
     int queued;
 };

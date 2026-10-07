@@ -152,7 +152,7 @@ AsyncOperation* async_operation_create(AsyncCallback callback, void* context) {
     // part in runtime operation registry
     operation->registry_next = async_runtime_global->operations;
     async_runtime_global->operations = operation;
-    async_operation_submit(operation);
+    // async_operation_submit(operation);
     return operation;
 }
 
@@ -185,6 +185,7 @@ void async_operation_destroy(AsyncOperation* operation)
      * 还在 pending queue 中，不能释放。
      */
     if (operation->queued) return;
+    async_operation_unlink_from_parent(operation);
     AsyncOperation** current = &runtime->operations;
     while (*current)
     {
@@ -208,11 +209,82 @@ int async_operation_wait(AsyncOperation* operation)
     return 0;
 }
 
-void async_operation_cancel(AsyncOperation* operation) {
+static void async_operation_cancel_locked(AsyncOperation* op)
+{
+    if (!op) return;
+
+    /* 已取消的子树无需重复遍历 */
+    if (op->state == ASYNC_OPERATION_CANCELLED) return;
+
+    /* 只有 PENDING 能直接置为 CANCELLED；
+     * RUNNING 的 op 只能靠 token 让回调自愿退出，这里改不了 */
+    if (op->state == ASYNC_OPERATION_PENDING) {
+        op->state = ASYNC_OPERATION_CANCELLED;
+        op->error = ASYNC_ERROR_CANCELLED;
+    }
+
+    for (AsyncOperation* c = op->first_child; c; c = c->sibling_next)
+        async_operation_cancel_locked(c);
+}
+
+void async_operation_cancel(AsyncOperation* operation)
+{
     if (!operation) return;
-    if (operation->state != ASYNC_OPERATION_PENDING) return;
-    operation->state = ASYNC_OPERATION_CANCELLED;
-    operation->error = ASYNC_ERROR_CANCELLED;
+    AsyncRuntime* runtime = operation->runtime;
+    if (!runtime) return;
+
+    async_platform_lock(runtime->platform);
+    async_operation_cancel_locked(operation);
+    async_platform_unlock(runtime->platform);
+
+    /* 唤醒 worker，让它们丢弃 pending 队列里已取消的 op */
+    async_platform_wakeup(runtime->platform);
+}
+
+AsyncOperation* async_operation_create_child(AsyncOperation* parent,
+                                             AsyncCallback callback,
+                                             void* context)
+{
+    if (!parent) return NULL;
+    AsyncRuntime* runtime = parent->runtime;
+    if (!runtime) return NULL;
+
+    AsyncOperationState pstate = async_operation_state(parent);
+
+    /* 父已死：子直接取消，不提交、不挂链 */
+    if (pstate == ASYNC_OPERATION_CANCELLED ||
+        pstate == ASYNC_OPERATION_COMPLETED ||
+        pstate == ASYNC_OPERATION_FAILED)
+    {
+        AsyncOperation* op = async_operation_create(callback, context);
+        if (!op) return NULL;
+        op->parent = parent;
+        op->state  = ASYNC_OPERATION_CANCELLED;
+        op->error  = (pstate == ASYNC_OPERATION_CANCELLED)
+                     ? ASYNC_ERROR_CANCELLED : ASYNC_ERROR_UNKNOWN;
+        return op;   // 没提交 → queued==0 → 之后能 destroy
+    }
+
+    AsyncOperation* op = async_operation_create(callback, context);
+    if (!op) return NULL;
+
+    /* （在锁内二次检查父状态） */
+    async_platform_lock(runtime->platform);
+    if (parent->state == ASYNC_OPERATION_CANCELLED) {
+        async_platform_unlock(runtime->platform);
+        op->parent = parent;
+        op->state  = ASYNC_OPERATION_CANCELLED;
+        op->error  = ASYNC_ERROR_CANCELLED;
+        return op;   // 同样没提交
+    }
+    op->parent       = parent;
+    op->sibling_next = parent->first_child;   // 顺序：先接旧链
+    parent->first_child = op;                 // 再插头
+    async_platform_unlock(runtime->platform);
+
+    /* 挂好链后再提交 */
+    async_operation_submit(op);
+    return op;
 }
 
 AsyncOperationState async_operation_state(AsyncOperation* operation) {
@@ -229,6 +301,29 @@ AsyncResult async_operation_result(AsyncOperation* operation) {
 AsyncError async_operation_error(AsyncOperation* operation) {
     if (!operation) return ASYNC_ERROR_UNKNOWN;
     return operation->error;
+}
+
+void async_operation_unlink_from_parent(AsyncOperation* operation) {
+    if (!operation|| !operation->parent) return;
+    AsyncOperation* parent = operation->parent;
+    AsyncRuntime* runtime = operation->runtime;
+    if (!runtime) {
+        operation->parent = NULL;
+        return;
+    }
+
+    async_platform_lock(runtime->platform);
+    AsyncOperation** current = &parent->first_child;
+    while(*current) {
+        if (*current == operation) {
+            *current = operation->sibling_next;
+            break;
+        }
+        current = &(*current)->sibling_next;
+    }
+    operation->parent = NULL;
+    operation->sibling_next = NULL;
+    async_platform_unlock(runtime->platform);  
 }
 
 static void* runtime_worker(void* context)
@@ -272,6 +367,7 @@ static void* runtime_worker(void* context)
             operation->state = ASYNC_OPERATION_COMPLETED;
             operation->error = ASYNC_ERROR_NONE;
         }
+        async_operation_unlink_from_parent(operation);
     }
     return NULL;
 }

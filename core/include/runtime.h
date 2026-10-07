@@ -38,7 +38,9 @@ void async_runtime_stop(AsyncRuntime* runtime);
 // int async_runtime_poll(AsyncRuntime* runtime, int timeout_ms);
 void async_runtime_enqueue(AsyncRuntime* runtime, AsyncOperation* operation);
 /* Operation */
+void async_operation_unlink_from_parent(AsyncOperation* operation);
 AsyncOperation* async_operation_create(AsyncCallback callback, void* context);
+AsyncOperation* async_operation_create_child(AsyncOperation* parent, AsyncCallback callback, void* context);
 void async_operation_cancel(AsyncOperation* operation);
 int async_operation_submit(AsyncOperation* operation);
 AsyncResult async_operation_result(AsyncOperation* operation);
@@ -53,6 +55,9 @@ void limit_async_worker_count(int worker_limit);
 // macro
 #define ASYNC_WORKER_LIMIT(worker_limit) \
     limit_async_worker_count(worker_limit)
+
+#define ASYNC_CREATE_CHILD(parent, callback, context) \
+    async_operation_create_child((parent), (callback), (context))
 
 #define ASYNC_CREATE(callback, context) \
     async_operation_create(callback, context)
