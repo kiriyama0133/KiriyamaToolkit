@@ -12,6 +12,8 @@
 struct AsyncPlatform
 {
     int wake_fd;
+    pthread_t worker;
+    pthread_mutex_t mutex;
 };
 
 

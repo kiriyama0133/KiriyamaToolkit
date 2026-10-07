@@ -25,9 +25,9 @@ typedef void (*AsyncCallback) (AsyncOperation* operation, void* context);
 /* Runtime */
 AsyncRuntime* async_runtime_create(void);
 void async_runtime_destroy(AsyncRuntime* runtime);
-int async_runtime_run(AsyncRuntime* runtime);
+// int async_runtime_run(AsyncRuntime* runtime);
 void async_runtime_stop(AsyncRuntime* runtime);
-int async_runtime_poll(AsyncRuntime* runtime, int timeout_ms);
+// int async_runtime_poll(AsyncRuntime* runtime, int timeout_ms);
 void async_runtime_enqueue(AsyncRuntime* runtime, AsyncOperation* operation);
 /* Operation */
 AsyncOperation* async_operation_create(AsyncRuntime* runtime, AsyncCallback callback, void* context);
@@ -37,6 +37,8 @@ void* async_operation_result(AsyncOperation* operation);
 void async_operation_destroy(AsyncOperation* operation);
 AsyncError async_operation_error(AsyncOperation* operation);
 AsyncOperationState async_operation_state(AsyncOperation* operation);
+// Worker
+static void* runtime_worker(void* context);
 #ifdef __cplusplus
 }
 #endif

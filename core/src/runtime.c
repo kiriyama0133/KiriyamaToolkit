@@ -7,6 +7,11 @@ AsyncRuntime* async_runtime_create(void) {
     AsyncRuntime* runtime = calloc(1, sizeof(AsyncRuntime));
     if (!runtime) return NULL;
     runtime->platform=async_platform_create();
+    if (async_platform_start_worker(runtime->platform, runtime_worker, runtime) != 0) {
+        async_platform_destroy(runtime->platform);
+        free(runtime);
+        return NULL;
+    }
     if(!runtime->platform) {
         free(runtime);
         return NULL;
@@ -17,57 +22,59 @@ AsyncRuntime* async_runtime_create(void) {
 }
 
 // B-mode: poll
-int async_runtime_poll(AsyncRuntime* runtime, int timeout_ms) {
-    if (!runtime) return -1;
-    if (runtime->stopped) return 0;
-    // wait for platform events
-    runtime->dispatching = 1;
-    int result = async_platform_wait(runtime->platform, timeout_ms);
-    if (result < 0) return -1;
-    // execute pending operations
-    AsyncOperation* operation = runtime->pending_head;
-    if (!operation) return 0;
-    runtime->pending_head = operation->next;
-    if (!runtime->pending_head) {
-        runtime->pending_tail = NULL;
-    }
-    operation->next = NULL;
-    // running
-    operation->queued = 0;
-    if (operation->state == ASYNC_OPERATION_CANCELLED) return 1;
-    operation->state = ASYNC_OPERATION_RUNNING;
-    // execute callback
-    if (operation->callback) {
-        operation->callback(operation, operation->context);
-    }
-    runtime->dispatching = 0;
-    // completed
-    if (operation->state == ASYNC_OPERATION_RUNNING) {
-        operation->state = ASYNC_OPERATION_COMPLETED;
-        operation->error = ASYNC_ERROR_NONE;
-    }
-    return 1;
-}
+// int async_runtime_poll(AsyncRuntime* runtime, int timeout_ms) {
+//     if (!runtime) return -1;
+//     if (runtime->stopped) return 0;
+//     // wait for platform events
+//     runtime->dispatching = 1;
+//     int result = async_platform_wait(runtime->platform, timeout_ms);
+//     if (result < 0) return -1;
+//     // execute pending operations
+//     AsyncOperation* operation = runtime->pending_head;
+//     if (!operation) return 0;
+//     runtime->pending_head = operation->next;
+//     if (!runtime->pending_head) {
+//         runtime->pending_tail = NULL;
+//     }
+//     operation->next = NULL;
+//     // running
+//     operation->queued = 0;
+//     if (operation->state == ASYNC_OPERATION_CANCELLED) return 1;
+//     operation->state = ASYNC_OPERATION_RUNNING;
+//     // execute callback
+//     if (operation->callback) {
+//         operation->callback(operation, operation->context);
+//     }
+//     runtime->dispatching = 0;
+//     // completed
+//     if (operation->state == ASYNC_OPERATION_RUNNING) {
+//         operation->state = ASYNC_OPERATION_COMPLETED;
+//         operation->error = ASYNC_ERROR_NONE;
+//     }
+//     return 1;
+// }
 
 // A-mode: run
-int async_runtime_run(AsyncRuntime* runtime) {
-    if (!runtime) return -1;
-    if (runtime->running) return 0;
-    runtime->running = 1;
-    runtime->stopped = 0;
-    while (!runtime->stopped)
-    {
-        /* code */
-        async_runtime_poll(runtime, -1);
-    }
-    runtime->running = 0;
-    return 0;
-}
+// int async_runtime_run(AsyncRuntime* runtime) {
+//     if (!runtime) return -1;
+//     if (runtime->running) return 0;
+//     runtime->running = 1;
+//     runtime->stopped = 0;
+//     while (!runtime->stopped)
+//     {
+//         /* code */
+//         async_runtime_poll(runtime, -1);
+//     }
+//     runtime->running = 0;
+//     return 0;
+// }
 
 void async_runtime_stop(AsyncRuntime* runtime) {
     if (!runtime) return;
+    async_platform_lock(runtime->platform);
     runtime->stopped = 1;
     // if run() is blocking and waiting for platform events, wakeup it
+    async_platform_unlock(runtime->platform);
     async_platform_wakeup(runtime->platform);
 }
 
@@ -88,7 +95,10 @@ int async_operation_submit(AsyncOperation* operation) {
     if (operation->state != ASYNC_OPERATION_PENDING) return -1;
     if (operation->queued) return -1;
     operation->queued = 1;
-    async_runtime_enqueue(runtime, operation);
+    async_runtime_enqueue(runtime, operation);   
+    async_platform_lock(runtime->platform);
+    // join in pending queue
+    async_platform_unlock(runtime->platform);
     async_platform_wakeup(runtime->platform);
     return 0;
 }
@@ -113,6 +123,7 @@ void async_runtime_destroy(AsyncRuntime* runtime)
 {
     if (!runtime) return;
     if (runtime->running || runtime->dispatching) return;
+    async_platform_join_worker(runtime->platform);
     AsyncOperation* operation = runtime->operations;
     while (operation)
     {
@@ -173,4 +184,36 @@ void* async_operation_result(AsyncOperation* operation) {
 AsyncError async_operation_error(AsyncOperation* operation) {
     if (!operation) return ASYNC_ERROR_UNKNOWN;
     return operation->error;
+}
+
+static void* runtime_worker(void* context) {
+    AsyncRuntime* runtime = (AsyncRuntime*)context;
+    for (;;) {
+        async_platform_lock(runtime->platform);
+        if (runtime->stopped) {
+            async_platform_unlock(runtime->platform);
+            break;
+        }
+        AsyncOperation* operation = runtime->pending_head;
+        if (operation) {
+            runtime->pending_head = operation->next;
+            if (!runtime->pending_head) {
+                runtime->pending_tail = NULL;
+            }
+        operation->next = NULL;
+    }
+    if (!operation) {
+        async_platform_wait(runtime->platform, -1);
+        continue;
+    }
+    if (operation->state == ASYNC_OPERATION_CANCELLED) {
+        continue;
+    }
+    operation->state = ASYNC_OPERATION_RUNNING;
+    if (operation->callback) {
+        operation->callback(operation, operation->context);
+    }
+    operation->state = ASYNC_OPERATION_COMPLETED;
+    }
+    return NULL;
 }
